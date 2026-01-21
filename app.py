@@ -172,6 +172,14 @@ def gps_check():
     else:
         return f"❌ 실패 (약 {int(dist)}m 남음)"
 
+import traceback
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    traceback.print_exc()
+    return "서버 오류 발생 😢", 500
+
+
 # =====================
 # 관리자
 # =====================
