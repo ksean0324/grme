@@ -206,7 +206,7 @@ def admin():
     out += "<form method=post><button name=action value=start_gps>📡 GPS 미션 시작</button></form><br>"
 
     for u in users:
-        out += f"{u}: {users[u]} / 돈 {money[u]} / GPS 완료: {gps_success.get(u, False)}<br>"
+        out += f"{u}: {users[u]} / {users[u]} / 돈 {money[u]} / GPS 완료: {gps_success.get(u, False)}<br>"
 
     return out
 
