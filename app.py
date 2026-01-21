@@ -46,6 +46,7 @@ def index():
         session["name"] = name
         users.setdefault(name, "alive")
         money.setdefault(name, 0)
+        gps_success.setdefault(name, False)
         return redirect("/game")
 
     return """
@@ -90,7 +91,7 @@ function gps(){{
 """
 
 # =====================
-# 게임 화면 (폰 UI)
+# 게임 화면
 # =====================
 @app.route("/game")
 def game():
@@ -160,8 +161,10 @@ def gps_check():
 
         last_gps[n] = (lat, lon, now)
 
+        # 거리 계산
         dist = distance_m(lat, lon, TARGET_LAT, TARGET_LON)
 
+        # 미션 결과
         if dist <= RADIUS_M:
             if not gps_success.get(n):
                 money[n] += 100
@@ -176,26 +179,36 @@ def gps_check():
         return "서버 오류 발생 😢", 500
 
 # =====================
-# 관리자
+# 관리자 화면 + GPS 시작
 # =====================
 @app.route("/admin", methods=["GET","POST"])
 def admin():
+    out = ""
     if request.method == "POST":
-        if request.form.get("pw") != ADMIN_PW:
-            return "❌ 비번 틀림 (접근 거부)"
+        if request.form.get("pw") == ADMIN_PW:
+            session["admin"] = True
+        elif request.form.get("action") == "start_gps" and session.get("admin"):
+            # 모든 유저 GPS 미션 초기화
+            for u in users:
+                gps_success[u] = False
+            out += "<p>📡 모든 유저 GPS 미션 시작!</p>"
 
-        session["admin"] = True
-        out = "<h2>관리자</h2>"
-        for u in users:
-            out += f"{u}: {users[u]} / 돈 {money[u]}<br>"
-        return out
+    if not session.get("admin"):
+        return """
+        <form method=post>
+        관리자 비번:<input name=pw>
+        <button>접속</button>
+        </form>
+        """
 
-    return """
-    <form method=post>
-    관리자 비번:<input name=pw>
-    <button>접속</button>
-    </form>
-    """
+    # 관리자 화면
+    out += "<h2>관리자</h2>"
+    out += "<form method=post><button name=action value=start_gps>📡 GPS 미션 시작</button></form><br>"
+
+    for u in users:
+        out += f"{u}: {users[u]} / 돈 {money[u]} / GPS 완료: {gps_success.get(u, False)}<br>"
+
+    return out
 
 # =====================
 if __name__ == "__main__":
