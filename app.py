@@ -2,19 +2,19 @@ from flask import Flask, request, session, redirect
 import math, time, os, traceback
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "gps-game")  # 배포용 안전
+app.secret_key = os.environ.get("SECRET_KEY", "gps-game")
 
 # =====================
 # 데이터
 # =====================
-users = {}        # alive / dead
+users = {}
 money = {}
-last_gps = {}     # name: (lat, lon, time)
-gps_success = {}  # name: True
+last_gps = {}
+gps_success = {}
 
-ADMIN_PW = "0808"
+ADMIN_PW = os.environ.get("ADMIN_PW", "0808")
 
-# 기준 위치 (원주시 지정면 가곡로 70 근처)
+# 목표 위치
 TARGET_LAT = 37.2756
 TARGET_LON = 127.9025
 RADIUS_M = 120
@@ -42,19 +42,24 @@ def index():
         name = request.form.get("name")
         if not name:
             return "이름 없음"
+
         session.clear()
         session["name"] = name
-        users.setdefault(name, "alive")
-        money.setdefault(name, 0)
-        gps_success.setdefault(name, False)
+
+        # 서버 재시작 대비
+        if name not in users:
+            users[name] = "alive"
+            money[name] = 0
+            gps_success[name] = False
+
         return redirect("/game")
 
     return """
     <meta name=viewport content="width=device-width,initial-scale=1">
     <style>
-    body{{font-family:system-ui;background:#020617;color:white;text-align:center;padding-top:40px}}
-    input,button{{font-size:18px;padding:12px;border-radius:10px;border:none}}
-    button{{background:#22c55e;font-weight:800}}
+    body{font-family:system-ui;background:#020617;color:white;text-align:center;padding-top:40px}
+    input,button{font-size:18px;padding:12px;border-radius:10px;border:none}
+    button{background:#22c55e;font-weight:800}
     </style>
     <form method=post>
         <h2>이름 입력</h2>
@@ -64,40 +69,19 @@ def index():
     """
 
 # =====================
-# JS (GPS)
-# =====================
-def js():
-    return """
-<script>
-function gps(){{
-  const s=document.getElementById("status");
-  s.innerText="📡 GPS 확인 중...";
-
-  navigator.geolocation.getCurrentPosition(p=>{{
-    fetch("/earn/gps_check",{{
-      method:"POST",
-      headers:{{"Content-Type":"application/json"}},
-      body:JSON.stringify({{
-        lat:p.coords.latitude,
-        lon:p.coords.longitude
-      }})
-    }}).then(r=>r.text()).then(t=>s.innerText=t)
-  }},()=>{{
-    fetch("/earn/gps_check",{{method:"POST"}})
-      .then(r=>r.text()).then(t=>s.innerText=t)
-  }})
-}}
-</script>
-"""
-
-# =====================
 # 게임 화면
 # =====================
 @app.route("/game")
 def game():
     n = session.get("name")
-    if not n or n not in users:
+    if not n:
         return redirect("/")
+
+    # 서버 재시작 대비
+    if n not in users:
+        users[n] = "alive"
+        money[n] = 0
+        gps_success[n] = False
 
     if users.get(n) == "dead":
         return "<h1 style='text-align:center'>💀 즉사</h1>"
@@ -131,11 +115,11 @@ L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
     maxZoom: 19
 }}).addTo(map);
 
-// 🎯 목표 위치
+// 목표 위치
 let target = L.marker([{TARGET_LAT}, {TARGET_LON}]).addTo(map)
 .bindPopup("🎯 목표").openPopup();
 
-// 📍 내 위치
+// 내 위치
 let me = null;
 
 function updatePosition(pos){{
@@ -149,30 +133,27 @@ function updatePosition(pos){{
 
     map.setView([lat, lon], 17);
 
-    // 거리 계산
     let dist = getDistance(lat, lon, {TARGET_LAT}, {TARGET_LON});
-    document.getElementById("dist").innerText = "📏 거리: " + Math.floor(dist) + "m";
+    document.getElementById("dist").innerText =
+        "📏 거리: " + Math.floor(dist) + "m";
 
-    // 가까우면 색 바꾸기
     if(dist < {RADIUS_M}){{
         document.body.style.background = "#022c22";
     }}
 }}
 
-// 거리 계산 (JS)
 function getDistance(lat1, lon1, lat2, lon2){{
     const R = 6371000;
     let dLat = (lat2-lat1)*Math.PI/180;
     let dLon = (lon2-lon1)*Math.PI/180;
     let a =
-        Math.sin(dLat/2)*Math.sin(dLat/2) +
+        Math.sin(dLat/2)**2 +
         Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180) *
-        Math.sin(dLon/2)*Math.sin(dLon/2);
+        Math.sin(dLon/2)**2;
     let c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     return R*c;
 }}
 
-// 서버로 보내기
 function sendGPS(){{
     navigator.geolocation.getCurrentPosition(p=>{{
         fetch("/earn/gps_check",{{
@@ -185,13 +166,19 @@ function sendGPS(){{
         }})
         .then(r=>r.text())
         .then(t=>alert(t));
+    }}, ()=>{{
+        alert("GPS 권한 필요");
     }});
 }}
 
-// 🔄 실시간 위치 추적
-navigator.geolocation.watchPosition(updatePosition);
+navigator.geolocation.watchPosition(updatePosition, null, {{
+    enableHighAccuracy:true,
+    maximumAge:1000,
+    timeout:5000
+}});
 </script>
 """
+
 # =====================
 # GPS 체크
 # =====================
@@ -199,63 +186,65 @@ navigator.geolocation.watchPosition(updatePosition);
 def gps_check():
     try:
         n = session.get("name")
-        if not n or n not in users:
+        if not n:
             return "로그인 필요"
 
         if users.get(n) == "dead":
             return "💀 이미 탈락"
 
+        # 서버 재시작 대비
+        if n not in users:
+            users[n] = "alive"
+            money[n] = 0
+            gps_success[n] = False
+
         now = time.time()
 
-        if request.is_json:
-            data = request.get_json(silent=True)
-            lat = data.get("lat", TARGET_LAT + 1)
-            lon = data.get("lon", TARGET_LON + 1)
-        else:
-            lat = TARGET_LAT + 1
-            lon = TARGET_LON + 1
+        data = request.get_json(silent=True) or {}
+        lat = data.get("lat", TARGET_LAT + 1)
+        lon = data.get("lon", TARGET_LON + 1)
 
-        # 순간이동 감지
         if n in last_gps:
             plat, plon, pt = last_gps[n]
             d = distance_m(plat, plon, lat, lon)
-            if d > 700 and now - pt < 3:
+
+            if d > 1000 and now - pt < 2:
                 users[n] = "dead"
                 return "🚨 순간이동 감지 → 즉사"
 
         last_gps[n] = (lat, lon, now)
 
-        # 거리 계산
         dist = distance_m(lat, lon, TARGET_LAT, TARGET_LON)
 
-        # 미션 결과
         if dist <= RADIUS_M:
             if not gps_success.get(n):
                 money[n] += 100
                 gps_success[n] = True
                 return "✅ 미션 성공! +100원"
             else:
-                return "⚠️ 이미 완료한 미션"
+                return "⚠️ 이미 완료"
         else:
             return f"❌ 실패 (약 {int(dist)}m 남음)"
+
     except Exception:
         traceback.print_exc()
-        return "서버 오류 발생 😢", 500
+        return "서버 오류", 500
 
 # =====================
-# 관리자 화면 + GPS 시작
+# 관리자
 # =====================
 @app.route("/admin", methods=["GET","POST"])
 def admin():
     out = ""
+
     if request.method == "POST":
         if request.form.get("pw") == ADMIN_PW:
             session["admin"] = True
+
         elif request.form.get("action") == "start_gps" and session.get("admin"):
-            # 모든 유저 GPS 미션 초기화
             for u in users:
                 gps_success[u] = False
-            out += "<p>📡 모든 유저 GPS 미션 시작!</p>"
+            out += "<p>📡 GPS 미션 시작!</p>"
 
     if not session.get("admin"):
         return """
@@ -265,19 +254,14 @@ def admin():
         </form>
         """
 
-    # 관리자 화면
     out += "<h2>관리자</h2>"
     out += "<form method=post><button name=action value=start_gps>📡 GPS 미션 시작</button></form><br>"
 
     for u in users:
-        out += f"{u}: {users[u]} / {users[u]} / 돈 {money[u]} / GPS 완료: {gps_success.get(u, False)}<br>"
+        out += f"{u}: {users[u]} / 돈 {money[u]} / GPS 완료: {gps_success.get(u, False)}<br>"
 
     return out
 
 # =====================
 if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        debug=False
-    )
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
