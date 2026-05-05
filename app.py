@@ -1,5 +1,5 @@
 from flask import Flask, request, session, redirect, jsonify
-import math, time, os
+import math, time, os, json, random
 
 app = Flask(__name__)
 app.secret_key = "gps-game"
@@ -10,18 +10,33 @@ app.secret_key = "gps-game"
 users = {}
 money = {}
 last_gps = {}
-gps_success = {}
 
-# 부활 시스템
-reviving = {}  # target: (reviver, end_time)
+airdrops = []  # [{lat, lon, active}]
 
-# 위치 (관리자에서 바꿀 수 있음)
-TARGET_LAT = 37.2756
-TARGET_LON = 127.9025
+DATA_FILE = "target.json"
+
+# =====================
+# 좌표 로드/저장
+# =====================
+def load_target():
+    global TARGET_LAT, TARGET_LON
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE) as f:
+            data = json.load(f)
+            TARGET_LAT = data["lat"]
+            TARGET_LON = data["lon"]
+    else:
+        TARGET_LAT = 37.2756
+        TARGET_LON = 127.9025
+
+def save_target(lat, lon):
+    with open(DATA_FILE, "w") as f:
+        json.dump({"lat": lat, "lon": lon}, f)
+
+load_target()
+
 RADIUS_M = 120
-
-REVIVE_RANGE = 20
-REVIVE_TIME = 5
+ADMIN_PW = "0808"
 
 # =====================
 def distance_m(lat1, lon1, lat2, lon2):
@@ -37,19 +52,14 @@ def distance_m(lat1, lon1, lat2, lon2):
 def index():
     if request.method == "POST":
         name = request.form.get("name")
-        if not name:
-            return "이름 없음"
-
         session["name"] = name
 
         users.setdefault(name, "alive")
         money.setdefault(name, 0)
-        gps_success.setdefault(name, False)
 
         return redirect("/game")
 
     return """
-    <meta name=viewport content="width=device-width,initial-scale=1">
     <form method=post>
     <h2>닉네임</h2>
     <input name=name>
@@ -70,16 +80,15 @@ def game():
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
 
 <style>
-body {{margin:0;background:#0f172a;color:white;font-family:system-ui}}
+body {{margin:0;background:#0f172a;color:white}}
 #map {{height:60vh}}
-.btn {{width:100%;padding:15px;margin-top:10px;border:none;border-radius:10px}}
+.btn {{width:100%;padding:12px;margin-top:5px}}
 </style>
 
-<h2>👤 {n}</h2>
-💰 돈: {money[n]}<br>
-<div id="status">📡 위치 확인중...</div>
+<h3>👤 {n}</h3>
+💰 {money[n]}원<br>
 
-<button class="btn" onclick="revive()">❤️ 부활</button>
+<a href="/admin">👑 관리자</a>
 
 <div id="map"></div>
 
@@ -90,45 +99,52 @@ let map = L.map('map').setView([{TARGET_LAT},{TARGET_LON}],17);
 
 L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
 
-// 내 위치
+// 🎯 목표
+L.circle([{TARGET_LAT},{TARGET_LON}], {{
+    radius:{RADIUS_M},
+    color:"green"
+}}).addTo(map);
+
+// 📍 내 위치
 let me=null;
 
-function sendGPS(lat, lon){{
-    fetch("/gps", {{
-        method:"POST",
-        headers:{{"Content-Type":"application/json"}},
-        body:JSON.stringify({{lat:lat, lon:lon}})
-    }})
-    .then(r=>r.text())
-    .then(t=>document.getElementById("status").innerText = t);
-}}
-
-function updatePosition(p){{
+function update(p){{
     let lat=p.coords.latitude;
     let lon=p.coords.longitude;
 
     if(me) map.removeLayer(me);
-    me = L.marker([lat,lon]).addTo(map).bindPopup("📍 나");
+    me = L.marker([lat,lon]).addTo(map);
 
     map.setView([lat,lon],17);
 
-    sendGPS(lat, lon);
-}}
-
-navigator.geolocation.watchPosition(updatePosition);
-
-// 부활 버튼
-function revive(){{
-    let target = prompt("살릴 사람 이름");
-
-    fetch("/revive", {{
+    fetch("/gps", {{
         method:"POST",
         headers:{{"Content-Type":"application/json"}},
-        body:JSON.stringify({{target:target}})
-    }})
-    .then(r=>r.text())
-    .then(alert);
+        body:JSON.stringify({{lat:lat, lon:lon}})
+    }});
 }}
+
+navigator.geolocation.watchPosition(update);
+
+// 🪂 에어드랍 표시
+let drops=[];
+
+function loadDrops(){{
+    fetch("/airdrops")
+    .then(r=>r.json())
+    .then(data=>{{
+        drops.forEach(d=>map.removeLayer(d));
+        drops=[];
+
+        data.forEach(p=>{{
+            let m = L.marker([p.lat,p.lon]).addTo(map)
+                .bindPopup("🪂 에어드랍");
+            drops.push(m);
+        }});
+    }});
+}}
+
+setInterval(loadDrops, 3000);
 
 </script>
 """
@@ -137,70 +153,92 @@ function revive(){{
 @app.route("/gps", methods=["POST"])
 def gps():
     n = session.get("name")
-    data = request.get_json(silent=True) or {}
-
-    lat = data.get("lat")
-    lon = data.get("lon")
-
-    if lat is None or lon is None:
-        return "GPS 없음"
-
-    last_gps[n] = (lat, lon, time.time())
-
-    # 🔥 부활 판정
-    for target in list(reviving):
-        reviver, end = reviving[target]
-
-        if time.time() >= end:
-            if target in users:
-                users[target] = "alive"
-                del reviving[target]
-
-    return "📍 위치 업데이트"
-
-# =====================
-@app.route("/players")
-def players():
-    result = {}
-
-    for name in last_gps:
-        lat, lon, _ = last_gps[name]
-        result[name] = {
-            "lat": lat,
-            "lon": lon,
-            "alive": users.get(name) == "alive"
-        }
-
-    return jsonify(result)
-
-# =====================
-@app.route("/revive", methods=["POST"])
-def revive_api():
-    me = session.get("name")
     data = request.get_json()
 
-    target = data.get("target")
+    last_gps[n] = (data["lat"], data["lon"], time.time())
+    return "ok"
 
-    if not me or target not in users:
-        return "오류"
+# =====================
+@app.route("/airdrops")
+def get_drops():
+    return jsonify(airdrops)
 
-    if users.get(target) != "dead":
-        return "살아있음"
+# =====================
+@app.route("/admin", methods=["GET","POST"])
+def admin():
+    if request.method == "POST":
+        if request.form.get("pw") == ADMIN_PW:
+            session["admin"] = True
 
-    if me not in last_gps or target not in last_gps:
-        return "위치 없음"
+        elif request.form.get("action") == "drop" and session.get("admin"):
+            # 🪂 대한민국 랜덤 위치
+            lat = random.uniform(33.0, 38.5)
+            lon = random.uniform(125.0, 129.5)
 
-    mlat, mlon, _ = last_gps[me]
-    tlat, tlon, _ = last_gps[target]
+            airdrops.append({"lat":lat,"lon":lon})
+    
+    if not session.get("admin"):
+        return """
+        <form method=post>
+        비번:<input name=pw>
+        <button>접속</button>
+        </form>
+        """
 
-    dist = distance_m(mlat, mlon, tlat, tlon)
+    return f"""
+    <h2>관리자</h2>
 
-    if dist > REVIVE_RANGE:
-        return "❌ 너무 멀다"
+    <form method=post>
+    <button name=action value=drop>🪂 에어드랍 생성</button>
+    </form>
 
-    reviving[target] = (me, time.time() + REVIVE_TIME)
+    <h3>📍 목표 위치 설정</h3>
+    <div id="map" style="height:50vh"></div>
+    <p id="coords"></p>
+    <button onclick="save()">저장</button>
 
-    return f"❤️ {target} 살리는 중 (5초)"
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+    <script>
+    let selected=null;
+
+    let map = L.map('map').setView([{TARGET_LAT},{TARGET_LON}],17);
+    L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
+
+    map.on('click', e=>{{
+        selected={{lat:e.latlng.lat, lon:e.latlng.lng}};
+        document.getElementById("coords").innerText =
+            selected.lat + "," + selected.lon;
+    }});
+
+    function save(){{
+        fetch("/set_target", {{
+            method:"POST",
+            headers:{{"Content-Type":"application/json"}},
+            body:JSON.stringify(selected)
+        }})
+        .then(r=>r.text())
+        .then(alert);
+    }}
+    </script>
+    """
+
+# =====================
+@app.route("/set_target", methods=["POST"])
+def set_target():
+    if not session.get("admin"):
+        return "권한 없음"
+
+    global TARGET_LAT, TARGET_LON
+
+    data = request.get_json()
+    TARGET_LAT = data["lat"]
+    TARGET_LON = data["lon"]
+
+    save_target(TARGET_LAT, TARGET_LON)
+
+    return "저장 완료"
 
 # =====================
 if __name__ == "__main__":
