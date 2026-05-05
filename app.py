@@ -102,32 +102,96 @@ def game():
     if users.get(n) == "dead":
         return "<h1 style='text-align:center'>💀 즉사</h1>"
 
-    html = """
+    return f"""
 <!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
 <style>
-body{{margin:0;background:#0f172a;color:#e5e7eb;font-family:system-ui}}
-.app{{max-width:420px;margin:auto;min-height:100vh;padding:20px}}
-.card{{background:#020617;border-radius:18px;padding:20px}}
-.btn{{width:100%;padding:18px;font-size:18px;border-radius:16px;border:none;
-background:#22c55e;color:black;font-weight:900;margin-top:16px}}
-#status{{margin-top:12px;font-size:14px}}
-a{{color:#94a3b8;font-size:12px}}
+body{{margin:0;background:#0f172a;color:white;font-family:system-ui}}
+#map{{height:60vh;border-radius:20px;margin-bottom:10px}}
+.card{{padding:15px}}
+.btn{{width:100%;padding:15px;font-size:18px;border:none;border-radius:12px;
+background:#22c55e;color:black;font-weight:900;margin-top:10px}}
 </style>
 
-<div class=app>
- <div class=card>
-  <h2>👤 {name}</h2>
-  💰 돈: {money}<br>
-  <div id=status>📍 GPS 대기</div>
-  <button class=btn onclick="gps()">📡 GPS 미션</button>
- </div>
- <br><a href=/admin>관리자</a>
+<div class=card>
+<h2>👤 {n}</h2>
+💰 돈: {money[n]}<br>
+<div id="dist">📏 거리 계산 중...</div>
+<button class=btn onclick="sendGPS()">📡 미션 체크</button>
 </div>
-{js}
-"""
-    return html.format(name=n, money=money[n], js=js())
 
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+let map = L.map('map').setView([{TARGET_LAT}, {TARGET_LON}], 17);
+
+L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    maxZoom: 19
+}}).addTo(map);
+
+// 🎯 목표 위치
+let target = L.marker([{TARGET_LAT}, {TARGET_LON}]).addTo(map)
+.bindPopup("🎯 목표").openPopup();
+
+// 📍 내 위치
+let me = null;
+
+function updatePosition(pos){{
+    let lat = pos.coords.latitude;
+    let lon = pos.coords.longitude;
+
+    if(me) map.removeLayer(me);
+
+    me = L.marker([lat, lon]).addTo(map)
+        .bindPopup("📍 나");
+
+    map.setView([lat, lon], 17);
+
+    // 거리 계산
+    let dist = getDistance(lat, lon, {TARGET_LAT}, {TARGET_LON});
+    document.getElementById("dist").innerText = "📏 거리: " + Math.floor(dist) + "m";
+
+    // 가까우면 색 바꾸기
+    if(dist < {RADIUS_M}){{
+        document.body.style.background = "#022c22";
+    }}
+}}
+
+// 거리 계산 (JS)
+function getDistance(lat1, lon1, lat2, lon2){{
+    const R = 6371000;
+    let dLat = (lat2-lat1)*Math.PI/180;
+    let dLon = (lon2-lon1)*Math.PI/180;
+    let a =
+        Math.sin(dLat/2)*Math.sin(dLat/2) +
+        Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180) *
+        Math.sin(dLon/2)*Math.sin(dLon/2);
+    let c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R*c;
+}}
+
+// 서버로 보내기
+function sendGPS(){{
+    navigator.geolocation.getCurrentPosition(p=>{{
+        fetch("/earn/gps_check",{{
+            method:"POST",
+            headers:{{"Content-Type":"application/json"}},
+            body:JSON.stringify({{
+                lat:p.coords.latitude,
+                lon:p.coords.longitude
+            }})
+        }})
+        .then(r=>r.text())
+        .then(t=>alert(t));
+    }});
+}}
+
+// 🔄 실시간 위치 추적
+navigator.geolocation.watchPosition(updatePosition);
+</script>
+"""
 # =====================
 # GPS 체크
 # =====================
