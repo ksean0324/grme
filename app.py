@@ -46,7 +46,6 @@ def index():
         session.clear()
         session["name"] = name
 
-        # 서버 재시작 대비
         if name not in users:
             users[name] = "alive"
             money[name] = 0
@@ -77,7 +76,6 @@ def game():
     if not n:
         return redirect("/")
 
-    # 서버 재시작 대비
     if n not in users:
         users[n] = "alive"
         money[n] = 0
@@ -90,32 +88,37 @@ def game():
 <!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
 <style>
 body{{margin:0;background:#0f172a;color:white;font-family:system-ui}}
-#map{{height:60vh;border-radius:20px;margin-bottom:10px}}
-.card{{padding:15px}}
+.container{{max-width:600px;margin:auto;padding:10px}}
+#map{{height:55vh;border-radius:16px;margin-top:10px}}
+.card{{padding:12px}}
 .btn{{width:100%;padding:15px;font-size:18px;border:none;border-radius:12px;
 background:#22c55e;color:black;font-weight:900;margin-top:10px}}
 </style>
 
-<div class=card>
+<div class="container">
+<div class="card">
 <h2>👤 {n}</h2>
 💰 돈: {money[n]}<br>
 <div id="dist">📏 거리 계산 중...</div>
-<button class=btn onclick="sendGPS()">📡 미션 체크</button>
+<button class="btn" onclick="sendGPS()">📡 미션 체크</button>
 </div>
 
 <div id="map"></div>
+</div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script>
 let map = L.map('map').setView([{TARGET_LAT}, {TARGET_LON}], 17);
 
+// ⭐ 핵심 수정 (지도 정상)
 L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
     maxZoom: 19
 }}).addTo(map);
 
-// 목표 위치
+// 목표
 let target = L.marker([{TARGET_LAT}, {TARGET_LON}]).addTo(map)
 .bindPopup("🎯 목표").openPopup();
 
@@ -128,10 +131,9 @@ function updatePosition(pos){{
 
     if(me) map.removeLayer(me);
 
-    me = L.marker([lat, lon]).addTo(map)
-        .bindPopup("📍 나");
+    me = L.marker([lat, lon]).addTo(map).bindPopup("📍 나");
 
-    map.setView([lat, lon], 17);
+    map.setView([lat, lon]);
 
     let dist = getDistance(lat, lon, {TARGET_LAT}, {TARGET_LON});
     document.getElementById("dist").innerText =
@@ -166,11 +168,10 @@ function sendGPS(){{
         }})
         .then(r=>r.text())
         .then(t=>alert(t));
-    }}, ()=>{{
-        alert("GPS 권한 필요");
-    }});
+    }}, ()=>{{ alert("GPS 권한 필요"); }});
 }}
 
+// 실시간 추적
 navigator.geolocation.watchPosition(updatePosition, null, {{
     enableHighAccuracy:true,
     maximumAge:1000,
@@ -178,7 +179,6 @@ navigator.geolocation.watchPosition(updatePosition, null, {{
 }});
 </script>
 """
-
 # =====================
 # GPS 체크
 # =====================
@@ -189,14 +189,13 @@ def gps_check():
         if not n:
             return "로그인 필요"
 
-        if users.get(n) == "dead":
-            return "💀 이미 탈락"
-
-        # 서버 재시작 대비
         if n not in users:
             users[n] = "alive"
             money[n] = 0
             gps_success[n] = False
+
+        if users.get(n) == "dead":
+            return "💀 이미 탈락"
 
         now = time.time()
 
@@ -240,7 +239,6 @@ def admin():
     if request.method == "POST":
         if request.form.get("pw") == ADMIN_PW:
             session["admin"] = True
-
         elif request.form.get("action") == "start_gps" and session.get("admin"):
             for u in users:
                 gps_success[u] = False
