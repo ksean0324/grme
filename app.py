@@ -313,52 +313,151 @@ def admin():
         </form>
         """
 
-    return """
-<h2>관리자</h2>
+    return f"""
+<!doctype html>
+<meta name=viewport content="width=device-width,initial-scale=1">
 
-<h3>현상금</h3>
-<input id="target">
+<!-- 🔥 이거 없으면 지도 깨짐 -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+body {{
+    font-family: system-ui;
+    margin: 0;
+    background: #0f172a;
+    color: white;
+}}
+
+.panel {{
+    padding: 15px;
+}}
+
+input, button {{
+    padding: 10px;
+    font-size: 16px;
+    margin-top: 5px;
+}}
+
+button {{
+    background: #22c55e;
+    border: none;
+    border-radius: 8px;
+    font-weight: bold;
+}}
+
+#map {{
+    height: 60vh;
+    width: 100%;
+}}
+</style>
+
+<div class="panel">
+<h2>👑 관리자</h2>
+
+<h3>💰 현상금</h3>
+<input id="target" placeholder="닉네임">
 <button onclick="b()">지정</button>
 
-<h3>공지</h3>
-<input id="msg">
+<h3>📢 공지</h3>
+<input id="msg" placeholder="메시지">
 <button onclick="send()">전송</button>
 
-<h3>에어드랍</h3>
-<div id="map" style="height:400px"></div>
+<h3>🪂 에어드랍</h3>
+<p>👉 지도 클릭하면 생성됨 / 마커 클릭하면 삭제</p>
+</div>
+
+<div id="map"></div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
 <script>
-let map=L.map('map').setView([37.377971,127.877029],17);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+let map = L.map('map').setView([{TARGET_LAT}, {TARGET_LON}], 17);
 
-map.on("click",e=>{
- fetch("/add_drop",{
-  method:"POST",
-  headers:{"Content-Type":"application/json"},
-  body:JSON.stringify({lat:e.latlng.lat,lon:e.latlng.lng})
- });
-});
+// 지도 타일
+L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    maxZoom: 19
+}}).addTo(map);
 
-function b(){
- fetch("/set_bounty",{
-  method:"POST",
-  headers:{"Content-Type":"application/json"},
-  body:JSON.stringify({target:document.getElementById("target").value})
- });
-}
+// 🔥 지도 깨짐 방지 핵심
+setTimeout(()=>map.invalidateSize(), 300);
 
-function send(){
- fetch("/broadcast",{
-  method:"POST",
-  headers:{"Content-Type":"application/json"},
-  body:JSON.stringify({msg:document.getElementById("msg").value,type:"danger"})
- });
-}
+// =====================
+// 에어드랍 표시
+// =====================
+let markers = [];
+
+function loadDrops(){{
+    fetch("/airdrops")
+    .then(r=>r.json())
+    .then(data=>{{
+        markers.forEach(m=>map.removeLayer(m));
+        markers = [];
+
+        data.forEach(d=>{{
+            let m = L.marker([d.lat, d.lon]).addTo(map)
+                .bindPopup("🪂 ID:"+d.id+"<br><button onclick='del("+d.id+")'>삭제</button>");
+            markers.push(m);
+        }});
+    }});
+}}
+
+// 생성 (지도 클릭)
+map.on("click", e=>{{
+    fetch("/add_drop", {{
+        method:"POST",
+        headers:{{"Content-Type":"application/json"}},
+        body:JSON.stringify({{
+            lat:e.latlng.lat,
+            lon:e.latlng.lng
+        }})
+    }}).then(loadDrops);
+}});
+
+// 삭제
+function del(id){{
+    fetch("/remove_drop", {{
+        method:"POST",
+        headers:{{"Content-Type":"application/json"}},
+        body:JSON.stringify({{id:id}})
+    }}).then(loadDrops);
+}}
+
+// =====================
+// 현상금
+// =====================
+function b(){{
+    let t = document.getElementById("target").value;
+
+    fetch("/set_bounty", {{
+        method:"POST",
+        headers:{{"Content-Type":"application/json"}},
+        body:JSON.stringify({{target:t}})
+    }})
+    .then(r=>r.text())
+    .then(alert);
+}}
+
+// =====================
+// 공지
+// =====================
+function send(){{
+    let msg = document.getElementById("msg").value;
+
+    fetch("/broadcast", {{
+        method:"POST",
+        headers:{{"Content-Type":"application/json"}},
+        body:JSON.stringify({{
+            msg: msg,
+            type: "danger"
+        }})
+    }});
+}}
+
+// 자동 갱신
+loadDrops();
+setInterval(loadDrops, 3000);
 </script>
 """
-
 # =====================
 if __name__=="__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
