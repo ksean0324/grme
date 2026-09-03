@@ -1,6 +1,6 @@
 from flask import Flask, request, session, redirect, jsonify
 import math, time, os, threading, html, json
-from threading import Lock
+from threading import RLock
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "gps-game-secure-2026-v4")
@@ -23,7 +23,8 @@ damage_zone = None
 broadcasts = []
 bounties = {}
 
-data_lock = Lock()
+# 저장 도중에도 같은 요청이 안전하게 잠금을 다시 사용할 수 있게 한다.
+data_lock = RLock()
 SAVE_FILE = "game_save.json"
 
 ADMIN_PW = os.environ.get("ADMIN_PW", "0808")
@@ -47,7 +48,7 @@ def distance_m(lat1, lon1, lat2, lon2):
 
 # ====================== 데이터 저장/로드 ======================
 def load_data():
-    global users, money, last_gps, gps_success, tracks, frozen, damage_zone, broadcasts, bounties
+    global users, money, last_gps, gps_success, tracks, frozen, damage_zone, broadcasts, bounties, airdrops
     if os.path.exists(SAVE_FILE):
         try:
             with open(SAVE_FILE, "r", encoding="utf-8") as f:
@@ -61,9 +62,10 @@ def load_data():
             damage_zone = data.get("damage_zone")
             broadcasts = data.get("broadcasts", [])
             bounties = data.get("bounties", {})
-            print(f"✅ save.json 로드 완료 ({len(users)}명 플레이어)")
+            airdrops = data.get("airdrops", [])
+            print(f"[OK] save.json 로드 완료 ({len(users)}명 플레이어)")
         except Exception as e:
-            print("⚠️ save.json 로드 실패:", e)
+            print("[WARN] save.json 로드 실패:", e)
 
 def save_data():
     with data_lock:
@@ -77,12 +79,13 @@ def save_data():
             "damage_zone": damage_zone,
             "broadcasts": broadcasts,
             "bounties": dict(bounties),
+            "airdrops": list(airdrops),
         }
     try:
         with open(SAVE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print("⚠️ save 실패:", e)
+        print("[WARN] save 실패:", e)
 
 def auto_save_loop():
     while True:
@@ -108,9 +111,10 @@ def event_loop():
 
 
 # ====================== 시작 ======================
+# 기존 데이터를 먼저 읽어야 빈 초기 상태가 저장 파일을 덮어쓰지 않는다.
+load_data()
 threading.Thread(target=event_loop, daemon=True).start()
 threading.Thread(target=auto_save_loop, daemon=True).start()
-load_data()
 
 
 # ====================== 로그인 ======================
@@ -120,6 +124,8 @@ def index():
         n = request.form.get("name", "").strip()
         if not n:
             return "닉네임을 입력해주세요!"
+        if len(n) > 20:
+            return "닉네임은 20자 이하로 입력해주세요!"
 
         session["name"] = n
         users.setdefault(n, "alive")
@@ -166,6 +172,7 @@ def game():
 <div class="card">
     <h3>{safe_name} 💰 <span id=money>{money.get(n, 0)}</span></h3>
     <div id=dist class=info>📡 GPS 대기중...</div>
+    <div id=status class=info style="color:#93c5fd;margin-top:6px">목표 지점 체크인 +100 · 에어드롭 +250</div>
     <button onclick="sendGPS()">📡 위치 체크</button>
     <button onclick="location.reload()" style="background:#64748b">새로고침</button>
 </div>
@@ -203,18 +210,19 @@ function getDistance(a,b,c,d){{
 }}
 
 function sendGPS(){{
+    document.getElementById("status").innerText = "📡 위치 확인 중...";
     navigator.geolocation.getCurrentPosition(p => {{
         fetch("/gps", {{
             method:"POST",
             headers:{{"Content-Type":"application/json"}},
-            body:JSON.stringify({{lat:p.coords.latitude, lon:p.coords.longitude}})
+            body:JSON.stringify({{lat:p.coords.latitude, lon:p.coords.longitude, accuracy:p.coords.accuracy}})
         }})
         .then(r => r.text())
         .then(msg => {{
-            alert(msg);
-            if(msg.includes("+100") || msg.includes("성공")) location.reload();
+            document.getElementById("status").innerText = msg;
+            if(msg.includes("+100") || msg.includes("+250")) setTimeout(()=>location.reload(), 900);
         }});
-    }}, () => alert("GPS 권한이 필요합니다!"), {{enableHighAccuracy:true}});
+    }}, () => document.getElementById("status").innerText = "GPS 권한이 필요합니다!", {{enableHighAccuracy:true, timeout:10000}});
 }}
 
 function updateDanger(){{
@@ -250,7 +258,8 @@ async function checkBroadcast(){{
     if (b.time > lastBroadcastTime) {{
         lastBroadcastTime = b.time;
         let div = document.getElementById("broadcast");
-        div.innerHTML = `📢 <b>GM 방송</b><br>${{b.msg}}`;
+        div.textContent = `📢 GM 방송\n${{b.msg}}`;
+        div.style.whiteSpace = "pre-line";
         div.style.display = "block";
         setTimeout(() => {{ div.style.display = "none"; }}, 8000);
     }}
@@ -280,8 +289,16 @@ def gps():
     try:
         lat = float(data["lat"])
         lon = float(data["lon"])
-    except:
+        accuracy = float(data.get("accuracy", 0))
+    except (TypeError, ValueError):
         return "🚫 좌표 형식이 잘못되었습니다"
+
+    if not (math.isfinite(lat) and math.isfinite(lon)) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return "🚫 올바르지 않은 좌표입니다"
+    if not math.isfinite(accuracy) or accuracy < 0:
+        return "🚫 GPS 정확도 정보가 잘못되었습니다"
+    if accuracy > 100:
+        return f"📡 GPS 오차가 너무 큽니다 ({accuracy:.0f}m). 하늘이 보이는 곳에서 다시 시도하세요"
 
     with data_lock:
         if frozen.get(n):
@@ -309,6 +326,14 @@ def gps():
                 save_data()               # 사망은 중요 → 즉시 저장
                 return "☠️ 위험구역에 들어와 사망했습니다"
 
+        # 가까이 있는 에어드롭은 한 명만 획득하며 즉시 사라진다.
+        for drop in airdrops[:]:
+            if distance_m(lat, lon, drop["lat"], drop["lon"]) <= 30:
+                airdrops.remove(drop)
+                money[n] = money.get(n, 0) + 250
+                save_data()
+                return "🎁 에어드롭 획득! +250"
+
         if distance_m(lat, lon, TARGET_LAT, TARGET_LON) < RADIUS_M:
             if not gps_success.get(n, False):
                 money[n] = money.get(n, 0) + 100
@@ -324,6 +349,24 @@ def gps():
 def get_airdrops():
     with data_lock:
         return jsonify(airdrops)
+
+
+@app.route("/spawn_airdrop", methods=["POST"])
+def spawn_airdrop():
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    try:
+        lat = float(data["lat"])
+        lon = float(data["lon"])
+    except (KeyError, TypeError, ValueError):
+        return "좌표가 잘못되었습니다", 400
+    if not (math.isfinite(lat) and math.isfinite(lon)) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return "좌표가 잘못되었습니다", 400
+    with data_lock:
+        airdrops.append({"lat": lat, "lon": lon, "id": int(time.time() * 1000)})
+        save_data()
+    return "ok"
 
 
 # ====================== 방송 API ======================
@@ -433,6 +476,7 @@ def admin():
     <input id=r placeholder="반경(m)" value="50" style="width:80px">
     <button onclick="setDanger()">설정</button>
     <button onclick="clearDanger()">해제</button>
+    <button onclick="spawnAirdrop()" style="background:#16a34a">🎁 이 좌표에 에어드롭</button>
 </div>
 
 <div class="section">
@@ -460,6 +504,10 @@ let lines = [];
 let dangerCircleGM = null;
 let airdropMarkersGM = [];
 
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 // 지도 클릭 → 위험구역 좌표 자동 입력
 map.on('click', function(e) {
     document.getElementById('lat').value = e.latlng.lat.toFixed(6);
@@ -477,7 +525,7 @@ async function updatePlayers() {
         if (markers[p.name]) {
             markers[p.name].setLatLng([p.lat, p.lon]);
         } else {
-            let popupText = `<b>${p.name}</b><br>💰 ${p.money}<br>${p.state}`;
+            let popupText = `<b>${escapeHtml(p.name)}</b><br>💰 ${p.money}<br>${escapeHtml(p.state)}`;
             if (p.bounty > 0) popupText += `<br>🎯 현상금: ${p.bounty}원`;
             markers[p.name] = L.marker([p.lat, p.lon])
                 .addTo(map)
@@ -534,7 +582,14 @@ async function updateAirdropsGM() {
 
 function post(url, body) {
     fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)})
-    .then(() => { alert("✅ 실행 완료"); updatePlayers(); });
+    .then(async r => {
+        let message = await r.text();
+        if (!r.ok) throw new Error(message || `HTTP ${r.status}`);
+        alert("✅ 실행 완료");
+        updatePlayers();
+        updateAirdropsGM();
+    })
+    .catch(e => alert("❌ " + e.message));
 }
 
 function freeze(){ post("/freeze", {user:document.getElementById("user").value}); }
@@ -549,6 +604,12 @@ function setDanger(){
     });
 }
 function clearDanger(){ post("/clear_danger", {}); }
+function spawnAirdrop(){
+    post("/spawn_airdrop", {
+        lat: parseFloat(document.getElementById("lat").value),
+        lon: parseFloat(document.getElementById("lon").value)
+    });
+}
 
 function sendBroadcast(){
     let msg = document.getElementById("broadcastMsg").value.trim();
@@ -630,5 +691,5 @@ def get_danger():
 
 # ====================== 실행 ======================
 if __name__ == "__main__":
-    print("🚀 GPS 게임 서버 v4 시작 (마커 정리 + danger GM 표시 + 에어드랍 시각화 + 요청 검증)")
+    print("[START] GPS 게임 서버 v5")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
