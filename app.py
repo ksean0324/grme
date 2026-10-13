@@ -104,9 +104,10 @@ def event_loop():
                         airdrops.append({
                             "lat": TARGET_LAT,
                             "lon": TARGET_LON,
-                            "id": int(time.time())
+                            "id": int(time.time() * 1000)
                         })
                     events.remove(e)
+                    save_data()
         time.sleep(1)
 
 
@@ -128,9 +129,10 @@ def index():
             return "닉네임은 20자 이하로 입력해주세요!"
 
         session["name"] = n
-        users.setdefault(n, "alive")
-        money.setdefault(n, 0)
-        gps_success.setdefault(n, False)
+        with data_lock:
+            users.setdefault(n, "alive")
+            money.setdefault(n, 0)
+            gps_success.setdefault(n, False)
 
         return redirect("/game")
 
@@ -348,7 +350,7 @@ def gps():
 @app.route("/get_airdrops")
 def get_airdrops():
     with data_lock:
-        return jsonify(airdrops)
+        return jsonify(list(airdrops))
 
 
 @app.route("/spawn_airdrop", methods=["POST"])
@@ -372,12 +374,16 @@ def spawn_airdrop():
 # ====================== 방송 API ======================
 @app.route("/broadcast", methods=["POST"])
 def broadcast():
-    if not session.get("admin"): return "권한 없음"
-    msg = request.get_json().get("msg", "").strip()
-    if not msg: return "메시지를 입력하세요"
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    msg = str(data.get("msg", "")).strip()
+    if not msg:
+        return "메시지를 입력하세요", 400
     with data_lock:
         broadcasts.append({"time": time.time(), "msg": msg})
-        if len(broadcasts) > 20: broadcasts.pop(0)
+        if len(broadcasts) > 20:
+            broadcasts.pop(0)
     save_data()
     return "ok"
 
@@ -387,17 +393,22 @@ def get_broadcast():
         if broadcasts:
             latest = broadcasts[-1]
             return jsonify({"time": latest["time"], "msg": latest["msg"]})
-    return jsonify({"time": 0, "msg": ""})
+        return jsonify({"time": 0, "msg": ""})
 
 
 # ====================== 현상금 API ======================
 @app.route("/set_bounty", methods=["POST"])
 def set_bounty():
-    if not session.get("admin"): return "권한 없음"
-    data = request.get_json()
-    target = data.get("target", "").strip()
-    amount = int(data.get("amount", 0))
-    if not target or amount <= 0: return "잘못된 입력"
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    target = str(data.get("target", "")).strip()
+    try:
+        amount = int(data.get("amount", 0))
+    except (TypeError, ValueError):
+        return "잘못된 입력", 400
+    if not target or amount <= 0:
+        return "잘못된 입력", 400
     with data_lock:
         bounties[target] = amount
     save_data()
@@ -424,7 +435,7 @@ def get_players():
 @app.route("/get_tracks")
 def get_tracks():
     with data_lock:
-        return jsonify(tracks)
+        return jsonify({k: list(v) for k, v in tracks.items()})
 
 
 # ====================== 관리자 GM 콘솔 (마커 정리 + danger + 에어드랍) ======================
@@ -505,7 +516,7 @@ let dangerCircleGM = null;
 let airdropMarkersGM = [];
 
 function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return String(value).replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));
 }
 
 // 지도 클릭 → 위험구역 좌표 자동 입력
@@ -641,40 +652,64 @@ updateAirdropsGM();
 # ====================== 관리자 API ======================
 @app.route("/freeze", methods=["POST"])
 def freeze():
-    if not session.get("admin"): return "권한 없음"
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    user = str(data.get("user", "")).strip()
+    if not user:
+        return "유저 닉네임을 입력하세요", 400
     with data_lock:
-        frozen[request.get_json()["user"]] = True
+        frozen[user] = True
     return "ok"
 
 @app.route("/unfreeze", methods=["POST"])
 def unfreeze():
-    if not session.get("admin"): return "권한 없음"
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    user = str(data.get("user", "")).strip()
+    if not user:
+        return "유저 닉네임을 입력하세요", 400
     with data_lock:
-        frozen.pop(request.get_json()["user"], None)
+        frozen.pop(user, None)
     return "ok"
 
 @app.route("/kill", methods=["POST"])
 def kill():
-    if not session.get("admin"): return "권한 없음"
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    target = str(data.get("target", "")).strip()
+    if not target:
+        return "유저 닉네임을 입력하세요", 400
     with data_lock:
-        target = request.get_json()["target"]
         users[target] = "dead"
-    save_data()                     # 즉사 → 중요 이벤트
+    save_data()  # 즉사 → 중요 이벤트
     return "ok"
 
 @app.route("/set_danger", methods=["POST"])
 def set_danger():
-    if not session.get("admin"): return "권한 없음"
-    d = request.get_json()
+    if not session.get("admin"):
+        return "권한 없음", 403
+    d = request.get_json(silent=True) or {}
+    try:
+        lat = float(d["lat"])
+        lon = float(d["lon"])
+        r = float(d["r"])
+    except (KeyError, TypeError, ValueError):
+        return "좌표 또는 반경이 잘못되었습니다", 400
+    if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(r)) or r <= 0:
+        return "좌표 또는 반경이 잘못되었습니다", 400
     with data_lock:
         global damage_zone
-        damage_zone = (float(d["lat"]), float(d["lon"]), float(d["r"]))
+        damage_zone = (lat, lon, r)
     save_data()
     return "ok"
 
 @app.route("/clear_danger", methods=["POST"])
 def clear_danger():
-    if not session.get("admin"): return "권한 없음"
+    if not session.get("admin"):
+        return "권한 없음", 403
     with data_lock:
         global damage_zone
         damage_zone = None
