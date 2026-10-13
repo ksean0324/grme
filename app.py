@@ -374,6 +374,19 @@ def set_bounty():
     save_data()
     return "ok"
 
+@app.route("/clear_bounty", methods=["POST"])
+def clear_bounty():
+    if not session.get("admin"):
+        return "권한 없음", 403
+    data = request.get_json(silent=True) or {}
+    target = str(data.get("target", "")).strip()
+    if not target:
+        return "유저 닉네임을 선택하세요", 400
+    with data_lock:
+        bounties.pop(target, None)
+    save_data()
+    return "ok"
+
 
 @app.route("/get_players")
 def get_players():
@@ -471,6 +484,7 @@ def admin():
     </select>
     <input id=bountyAmount placeholder="현상금액" type="number" value="500" style="width:100px">
     <button onclick="setBounty()">현상금 걸기</button>
+    <button onclick="clearBounty()" style="background:#dc2626">현상금 제거</button>
 </div>
 <div id="map" class="map-container"></div>
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -598,6 +612,11 @@ function setBounty(){
     post("/set_bounty", {
         target: document.getElementById("bountyTarget").value.trim(),
         amount: parseInt(document.getElementById("bountyAmount").value)
+    });
+}
+function clearBounty(){
+    post("/clear_bounty", {
+        target: document.getElementById("bountyTarget").value.trim()
     });
 }
 setInterval(updatePlayers, 1000);
