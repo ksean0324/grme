@@ -5,12 +5,9 @@ from threading import RLock
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "gps-game-secure-2026-v4")
 
-# ====================== Pylance / VS Code 경고 억제 ======================
-# Embedded JavaScript 때문에 발생하는 false positive 무시
 # pyright: reportUndefinedVariable=false
 # pylint: disable=undefined-variable
 
-# ====================== 데이터 ======================
 users = {}
 money = {}
 last_gps = {}
@@ -23,19 +20,14 @@ damage_zone = None
 broadcasts = []
 bounties = {}
 
-# 저장 도중에도 같은 요청이 안전하게 잠금을 다시 사용할 수 있게 한다.
 data_lock = RLock()
 SAVE_FILE = "game_save.json"
-
 ADMIN_PW = os.environ.get("ADMIN_PW", "0808")
-
 TARGET_LAT = 37.377971
 TARGET_LON = 127.877029
 RADIUS_M = 120
 MAX_SPEED_KMH = 120
 
-
-# ====================== 거리 계산 ======================
 def distance_m(lat1, lon1, lat2, lon2):
     R = 6371000
     p1 = math.radians(lat1)
@@ -45,8 +37,6 @@ def distance_m(lat1, lon1, lat2, lon2):
     a = math.sin(dlat/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlon/2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-
-# ====================== 데이터 저장/로드 ======================
 def load_data():
     global users, money, last_gps, gps_success, tracks, frozen, damage_zone, broadcasts, bounties, airdrops
     if os.path.exists(SAVE_FILE):
@@ -92,7 +82,6 @@ def auto_save_loop():
         save_data()
         time.sleep(30)
 
-
 def event_loop():
     while True:
         now = time.time()
@@ -100,20 +89,14 @@ def event_loop():
             for e in events[:]:
                 if now >= e["time"]:
                     if e["type"] == "airdrop":
-                        airdrops.append({
-                            "lat": TARGET_LAT,
-                            "lon": TARGET_LON,
-                            "id": int(time.time() * 1000)
-                        })
+                        airdrops.append({"lat": TARGET_LAT, "lon": TARGET_LON, "id": int(time.time() * 1000)})
                     events.remove(e)
                     save_data()
         time.sleep(1)
 
-
 load_data()
 threading.Thread(target=event_loop, daemon=True).start()
 threading.Thread(target=auto_save_loop, daemon=True).start()
-
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -132,11 +115,11 @@ def index():
     return """
     <form method=post style="text-align:center;margin-top:100px;font-family:system-ui">
         <h1>📍 GPS 게임</h1>
+        <p style="color:#94a3b8;font-size:14px">📱폰·태블릿=플레이 · 💻컴퓨터=관전</p>
         <input name=name placeholder="닉네임" style="padding:12px;font-size:18px;width:280px"><br><br>
         <button style="padding:12px 30px;font-size:18px">입장하기</button>
     </form>
     """
-
 
 @app.route("/game")
 def game():
@@ -161,96 +144,49 @@ def game():
 </head>
 <body>
 <div class="card">
-    <h3>{safe_name} 💰 <span id=money>{money.get(n, 0)}</span></h3>
-    <div id=dist class=info>📡 GPS 대기중...</div>
+    <h3>{safe_name} 💰 <span id=money>{money.get(n, 0)}</span> <span id=modeBadge style="font-size:0.7em"></span></h3>
+    <div id=dist class=info>⏳ 확인 중...</div>
     <div id=status class=info style="color:#93c5fd;margin-top:6px">목표 지점 체크인 +100 · 에어드롭 +250</div>
-    <button onclick="sendGPS()">📡 위치 체크</button>
-    <button onclick="location.reload()" style="background:#64748b">새로고침</button>
+    <div id=playControls>
+      <button onclick="sendGPS()">📡 위치 체크</button>
+      <button onclick="location.reload()" style="background:#64748b">새로고침</button>
+    </div>
+    <div id=specControls style="display:none">
+      <button onclick="location.reload()" style="background:#64748b">새로고침</button>
+      <span style="color:#fca5a5;margin-left:6px">👁 관전자 · 빨간 핀 = 플레이어</span>
+    </div>
 </div>
 <div id="map"></div>
 <div id="broadcast"></div>
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script>
-let map = L.map('map').setView([{TARGET_LAT}, {TARGET_LON}], 17);
+const TLAT={TARGET_LAT}, TLON={TARGET_LON};
+function isPhoneOrTablet(){{
+  const ua=navigator.userAgent||"";
+  if(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)) return true;
+  if(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1) return true;
+  return false;
+}}
+const isPlayer=isPhoneOrTablet();
+let map=L.map('map').setView([TLAT,TLON],16);
 L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png').addTo(map);
-setTimeout(()=>map.invalidateSize(), 300);
-let me = null;
-let dangerCircle = null;
-let airdropMarkers = [];
-let lastBroadcastTime = 0;
-function updatePosition(p){{
-    let lat = p.coords.latitude;
-    let lon = p.coords.longitude;
-    if(me) map.removeLayer(me);
-    me = L.marker([lat, lon]).addTo(map);
-    map.setView([lat, lon], 17);
-    let d = getDistance(lat, lon, {TARGET_LAT}, {TARGET_LON});
-    document.getElementById("dist").innerText = `📏 ${{Math.floor(d)}}m`;
-}}
-function getDistance(a,b,c,d){{
-    const R=6371000;
-    let x=(c-a)*Math.PI/180;
-    let y=(d-b)*Math.PI/180;
-    let A=Math.sin(x/2)**2 + Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(y/2)**2;
-    return 2*R*Math.atan2(Math.sqrt(A), Math.sqrt(1-A));
-}}
-function sendGPS(){{
-    document.getElementById("status").innerText = "📡 위치 확인 중...";
-    navigator.geolocation.getCurrentPosition(p => {{
-        fetch("/gps", {{
-            method:"POST",
-            headers:{{"Content-Type":"application/json"}},
-            body:JSON.stringify({{lat:p.coords.latitude, lon:p.coords.longitude, accuracy:p.coords.accuracy}})
-        }})
-        .then(r => r.text())
-        .then(msg => {{
-            document.getElementById("status").innerText = msg;
-            if(msg.includes("+100") || msg.includes("+250")) setTimeout(()=>location.reload(), 900);
-        }});
-    }}, () => document.getElementById("status").innerText = "GPS 권한이 필요합니다!", {{enableHighAccuracy:true, timeout:10000}});
-}}
-function updateDanger(){{
-    fetch("/get_danger").then(r=>r.json()).then(d=>{{
-        if(d.lat){{
-            if(dangerCircle) map.removeLayer(dangerCircle);
-            dangerCircle = L.circle([d.lat, d.lon], {{radius: d.r, color:"red", fillOpacity:0.15}}).addTo(map);
-        }} else if(dangerCircle){{
-            map.removeLayer(dangerCircle);
-            dangerCircle = null;
-        }}
-    }});
-}}
-async function updateAirdrops(){{
-    airdropMarkers.forEach(m => map.removeLayer(m));
-    airdropMarkers = [];
-    let r = await fetch("/get_airdrops");
-    let data = await r.json();
-    data.forEach(a => {{
-        let m = L.marker([a.lat, a.lon], {{icon: L.divIcon({{className:'airdrop', html:'🎁', iconSize:[30,30]}})}}).addTo(map).bindPopup("🎁 에어드랍");
-        airdropMarkers.push(m);
-    }});
-}}
-async function checkBroadcast(){{
-    let r = await fetch("/get_broadcast");
-    let b = await r.json();
-    if (b.time > lastBroadcastTime) {{
-        lastBroadcastTime = b.time;
-        let div = document.getElementById("broadcast");
-        div.textContent = `📢 GM 방송\n${{b.msg}}`;
-        div.style.whiteSpace = "pre-line";
-        div.style.display = "block";
-        setTimeout(() => {{ div.style.display = "none"; }}, 8000);
-    }}
-}}
-setInterval(updateDanger, 2000);
-setInterval(updateAirdrops, 4000);
-setInterval(checkBroadcast, 3000);
-navigator.geolocation.watchPosition(updatePosition);
+setTimeout(()=>map.invalidateSize(),300);
+let me=null,dangerCircle=null,airdropMarkers=[],playerMarkers={{}},lastBroadcastTime=0;
+const redIcon=L.divIcon({{className:'pin',html:'<div style="width:16px;height:16px;background:#ef4444;border:2px solid #fff;border-radius:50%"></div>',iconSize:[16,16],iconAnchor:[8,8]}});
+function getDistance(a,b,c,d){{const R=6371000;let x=(c-a)*Math.PI/180,y=(d-b)*Math.PI/180;let A=Math.sin(x/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(y/2)**2;return 2*R*Math.atan2(Math.sqrt(A),Math.sqrt(1-A));}}
+function updatePosition(p){{let lat=p.coords.latitude,lon=p.coords.longitude;if(me)map.removeLayer(me);me=L.marker([lat,lon]).addTo(map);map.setView([lat,lon],17);document.getElementById("dist").innerText=`📏 ${{Math.floor(getDistance(lat,lon,TLAT,TLON))}}m`;}}
+function sendGPS(){{document.getElementById("status").innerText="📡 위치 확인 중...";navigator.geolocation.getCurrentPosition(p=>{{fetch("/gps",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{lat:p.coords.latitude,lon:p.coords.longitude,accuracy:p.coords.accuracy}})}}).then(r=>r.text()).then(msg=>{{document.getElementById("status").innerText=msg;if(msg.includes("+100")||msg.includes("+250"))setTimeout(()=>location.reload(),900);}});}},()=>document.getElementById("status").innerText="GPS 권한이 필요합니다!",{{enableHighAccuracy:true,timeout:10000}});}}
+function updateDanger(){{fetch("/get_danger").then(r=>r.json()).then(d=>{{if(d.lat){{if(dangerCircle)map.removeLayer(dangerCircle);dangerCircle=L.circle([d.lat,d.lon],{{radius:d.r,color:"red",fillOpacity:0.15}}).addTo(map);}}else if(dangerCircle){{map.removeLayer(dangerCircle);dangerCircle=null;}}}});}}
+async function updateAirdrops(){{airdropMarkers.forEach(m=>map.removeLayer(m));airdropMarkers=[];let data=await(await fetch("/get_airdrops")).json();data.forEach(a=>{{airdropMarkers.push(L.marker([a.lat,a.lon],{{icon:L.divIcon({{className:'airdrop',html:'🎁',iconSize:[30,30]}})}}).addTo(map).bindPopup("🎁 에어드랍"));}});}}
+async function checkBroadcast(){{let b=await(await fetch("/get_broadcast")).json();if(b.time>lastBroadcastTime){{lastBroadcastTime=b.time;let div=document.getElementById("broadcast");div.textContent=`📢 GM 방송\n${{b.msg}}`;div.style.whiteSpace="pre-line";div.style.display="block";setTimeout(()=>{{div.style.display="none";}},8000);}}}}
+async function updateSpectatorPlayers(){{let data=await(await fetch("/get_players")).json();let seen=new Set(),n=0;data.forEach(p=>{{if(p.lat==null||p.lon==null)return;n++;seen.add(p.name);let pop=`<b>${{p.name}}</b><br>💰 ${{p.money}}<br>${{p.state}}`;if(p.bounty>0)pop+=`<br>🎯 ${{p.bounty}}원`;if(playerMarkers[p.name]){{playerMarkers[p.name].setLatLng([p.lat,p.lon]);playerMarkers[p.name].setPopupContent(pop);}}else{{playerMarkers[p.name]=L.marker([p.lat,p.lon],{{icon:redIcon}}).addTo(map).bindPopup(pop);}}}});for(let name in playerMarkers){{if(!seen.has(name)){{map.removeLayer(playerMarkers[name]);delete playerMarkers[name];}}}}document.getElementById("dist").innerText=`👁 관전 · 플레이어 ${{n}}명`;}}
+if(isPlayer){{document.getElementById("modeBadge").innerText="📱 플레이어";document.getElementById("dist").innerText="📡 GPS 대기중...";document.getElementById("playControls").style.display="block";document.getElementById("specControls").style.display="none";if(navigator.geolocation)navigator.geolocation.watchPosition(updatePosition,()=>{{}},{{enableHighAccuracy:true}});}}
+else{{document.getElementById("modeBadge").innerText="💻 관전자";document.getElementById("status").innerText="컴퓨터 관전자 · GPS 없음 · 빨간 핀 = 모든 사람";document.getElementById("playControls").style.display="none";document.getElementById("specControls").style.display="block";updateSpectatorPlayers();setInterval(updateSpectatorPlayers,2000);}}
+setInterval(updateDanger,2000);setInterval(updateAirdrops,4000);setInterval(checkBroadcast,3000);
 </script>
 </body>
 </html>
 """
-
 
 @app.route("/gps", methods=["POST"])
 def gps():
@@ -308,12 +244,10 @@ def gps():
                 return "🎉 목표 지점 체크인 성공! +100"
     return "✅ 위치가 기록되었습니다"
 
-
 @app.route("/get_airdrops")
 def get_airdrops():
     with data_lock:
         return jsonify(list(airdrops))
-
 
 @app.route("/spawn_airdrop", methods=["POST"])
 def spawn_airdrop():
@@ -331,7 +265,6 @@ def spawn_airdrop():
         airdrops.append({"lat": lat, "lon": lon, "id": int(time.time() * 1000)})
         save_data()
     return "ok"
-
 
 @app.route("/broadcast", methods=["POST"])
 def broadcast():
@@ -355,7 +288,6 @@ def get_broadcast():
             latest = broadcasts[-1]
             return jsonify({"time": latest["time"], "msg": latest["msg"]})
         return jsonify({"time": 0, "msg": ""})
-
 
 @app.route("/set_bounty", methods=["POST"])
 def set_bounty():
@@ -387,7 +319,6 @@ def clear_bounty():
     save_data()
     return "ok"
 
-
 @app.route("/get_players")
 def get_players():
     arr = []
@@ -395,32 +326,16 @@ def get_players():
         seen = set()
         for n, pos in last_gps.items():
             seen.add(n)
-            arr.append({
-                "name": n,
-                "lat": pos[0],
-                "lon": pos[1],
-                "money": money.get(n, 0),
-                "state": users.get(n, "alive"),
-                "bounty": bounties.get(n, 0)
-            })
+            arr.append({"name": n, "lat": pos[0], "lon": pos[1], "money": money.get(n, 0), "state": users.get(n, "alive"), "bounty": bounties.get(n, 0)})
         for n in users:
             if n not in seen:
-                arr.append({
-                    "name": n,
-                    "lat": None,
-                    "lon": None,
-                    "money": money.get(n, 0),
-                    "state": users.get(n, "alive"),
-                    "bounty": bounties.get(n, 0)
-                })
+                arr.append({"name": n, "lat": None, "lon": None, "money": money.get(n, 0), "state": users.get(n, "alive"), "bounty": bounties.get(n, 0)})
     return jsonify(arr)
-
 
 @app.route("/get_tracks")
 def get_tracks():
     with data_lock:
         return jsonify({k: list(v) for k, v in tracks.items()})
-
 
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
@@ -443,22 +358,20 @@ def admin():
     <title>GM 콘솔</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
     <style>
-        body {margin:0; background:#0f172a; color:white; font-family:system-ui; padding:10px;}
-        h2,h3 {margin:10px 0;}
-        input, button, select {padding:8px; margin:3px; font-size:1em;}
-        select {background:#0f172a; color:white; border:1px solid #475569; border-radius:6px;}
-        button {background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer;}
-        .map-container {height:65vh; margin-top:15px; border:3px solid #334155; border-radius:8px;}
-        .section {background:#1e2937; padding:15px; border-radius:8px; margin-bottom:15px;}
+        body {{margin:0; background:#0f172a; color:white; font-family:system-ui; padding:10px;}}
+        h2,h3 {{margin:10px 0;}}
+        input, button, select {{padding:8px; margin:3px; font-size:1em;}}
+        select {{background:#0f172a; color:white; border:1px solid #475569; border-radius:6px;}}
+        button {{background:#3b82f6; color:white; border:none; border-radius:6px; cursor:pointer;}}
+        .map-container {{height:65vh; margin-top:15px; border:3px solid #334155; border-radius:8px;}}
+        .section {{background:#1e2937; padding:15px; border-radius:8px; margin-bottom:15px;}}
     </style>
 </head>
 <body>
-<h2>🛠 GM 콘솔 (실시간 지도)</h2>
+<h2>🛠 GM 콘솔</h2>
 <div class="section">
     <h3>👤 플레이어 선택</h3>
-    <select id=user style="width:220px;padding:8px;font-size:1em">
-        <option value="">-- 유저 선택 --</option>
-    </select>
+    <select id=user style="width:220px;padding:8px;font-size:1em"><option value="">-- 유저 선택 --</option></select>
     <button onclick="freeze()">🧊 얼리기</button>
     <button onclick="unfreeze()">🔥 해제</button>
     <button onclick="kill()">☠ 즉사</button>
@@ -470,215 +383,90 @@ def admin():
     <input id=r placeholder="반경(m)" value="50" style="width:80px">
     <button onclick="setDanger()">설정</button>
     <button onclick="clearDanger()">해제</button>
-    <button onclick="spawnAirdrop()" style="background:#16a34a">🎁 이 좌표에 에어드롭</button>
+    <button onclick="spawnAirdrop()" style="background:#16a34a">🎁 에어드롭</button>
 </div>
 <div class="section">
-    <h3>📢 전역 방송</h3>
-    <input id=broadcastMsg placeholder="방송할 메시지" style="width:380px">
-    <button onclick="sendBroadcast()">방송 보내기</button>
+    <h3>📢 방송</h3>
+    <input id=broadcastMsg placeholder="메시지" style="width:380px">
+    <button onclick="sendBroadcast()">보내기</button>
 </div>
 <div class="section">
-    <h3>🎯 현상금 설정</h3>
-    <select id=bountyTarget style="width:220px;padding:8px;font-size:1em">
-        <option value="">-- 유저 선택 --</option>
-    </select>
-    <input id=bountyAmount placeholder="현상금액" type="number" value="500" style="width:100px">
-    <button onclick="setBounty()">현상금 걸기</button>
-    <button onclick="clearBounty()" style="background:#dc2626">현상금 제거</button>
+    <h3>🎯 현상금</h3>
+    <select id=bountyTarget style="width:220px;padding:8px;font-size:1em"><option value="">-- 유저 선택 --</option></select>
+    <input id=bountyAmount type="number" value="500" style="width:100px">
+    <button onclick="setBounty()">걸기</button>
+    <button onclick="clearBounty()" style="background:#dc2626">제거</button>
 </div>
 <div id="map" class="map-container"></div>
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script>
-let map = L.map('map').setView([37.377971, 127.877029], 16);
+let map=L.map('map').setView([37.377971,127.877029],16);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-let markers = {};
-let lines = [];
-let dangerCircleGM = null;
-let airdropMarkersGM = [];
-function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, c => ({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));
-}
-map.on('click', function(e) {
-    document.getElementById('lat').value = e.latlng.lat.toFixed(6);
-    document.getElementById('lon').value = e.latlng.lng.toFixed(6);
-});
-async function updatePlayers() {
-    let r = await fetch("/get_players");
-    let data = await r.json();
-    let currentPlayers = new Set();
-    let names = [];
-    data.forEach(p => {
-        currentPlayers.add(p.name);
-        names.push(p.name);
-        if (p.lat == null || p.lon == null) return;
-        if (markers[p.name]) {
-            markers[p.name].setLatLng([p.lat, p.lon]);
-            markers[p.name].setPopupContent(
-                `<b>${escapeHtml(p.name)}</b><br>💰 ${p.money}<br>${escapeHtml(p.state)}` +
-                (p.bounty > 0 ? `<br>🎯 현상금: ${p.bounty}원` : '')
-            );
-        } else {
-            let popupText = `<b>${escapeHtml(p.name)}</b><br>💰 ${p.money}<br>${escapeHtml(p.state)}`;
-            if (p.bounty > 0) popupText += `<br>🎯 현상금: ${p.bounty}원`;
-            markers[p.name] = L.marker([p.lat, p.lon]).addTo(map).bindPopup(popupText);
-        }
-    });
-    for (let name in markers) {
-        if (!currentPlayers.has(name)) {
-            map.removeLayer(markers[name]);
-            delete markers[name];
-        }
-    }
-    fillUserSelect("user", names);
-    fillUserSelect("bountyTarget", names);
-}
-function fillUserSelect(selectId, names) {
-    let sel = document.getElementById(selectId);
-    if (!sel) return;
-    let prev = sel.value;
-    let opts = '<option value="">-- 유저 선택 --</option>';
-    names.sort().forEach(n => {
-        opts += `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`;
-    });
-    sel.innerHTML = opts;
-    if (prev && names.includes(prev)) sel.value = prev;
-}
-async function updateTracks() {
-    lines.forEach(l => map.removeLayer(l));
-    lines = [];
-    let r = await fetch("/get_tracks");
-    let data = await r.json();
-    for (let user in data) {
-        if (data[user].length > 1) {
-            let line = L.polyline(data[user], {color: '#f43f5e', weight: 4, opacity: 0.7}).addTo(map);
-            lines.push(line);
-        }
-    }
-}
-async function updateDangerGM() {
-    let r = await fetch("/get_danger");
-    let d = await r.json();
-    if (d.lat) {
-        if (dangerCircleGM) map.removeLayer(dangerCircleGM);
-        dangerCircleGM = L.circle([d.lat, d.lon], {radius: d.r, color:"red", fillOpacity:0.15}).addTo(map);
-    } else if (dangerCircleGM) {
-        map.removeLayer(dangerCircleGM);
-        dangerCircleGM = null;
-    }
-}
-async function updateAirdropsGM() {
-    airdropMarkersGM.forEach(m => map.removeLayer(m));
-    airdropMarkersGM = [];
-    let r = await fetch("/get_airdrops");
-    let data = await r.json();
-    data.forEach(a => {
-        let m = L.marker([a.lat, a.lon], {icon: L.divIcon({className:'airdrop', html:'🎁', iconSize:[30,30]})}).addTo(map).bindPopup("🎁 에어드랍");
-        airdropMarkersGM.push(m);
-    });
-}
-function post(url, body) {
-    fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)})
-    .then(async r => {
-        let message = await r.text();
-        if (!r.ok) throw new Error(message || `HTTP ${r.status}`);
-        alert("✅ 실행 완료");
-        updatePlayers();
-        updateAirdropsGM();
-    })
-    .catch(e => alert("❌ " + e.message));
-}
-function freeze(){ post("/freeze", {user:document.getElementById("user").value}); }
-function unfreeze(){ post("/unfreeze", {user:document.getElementById("user").value}); }
-function kill(){ post("/kill", {target:document.getElementById("user").value}); }
-function setDanger(){
-    post("/set_danger", {
-        lat: parseFloat(document.getElementById("lat").value),
-        lon: parseFloat(document.getElementById("lon").value),
-        r: parseFloat(document.getElementById("r").value)
-    });
-}
-function clearDanger(){ post("/clear_danger", {}); }
-function spawnAirdrop(){
-    post("/spawn_airdrop", {
-        lat: parseFloat(document.getElementById("lat").value),
-        lon: parseFloat(document.getElementById("lon").value)
-    });
-}
-function sendBroadcast(){
-    let msg = document.getElementById("broadcastMsg").value.trim();
-    if(msg) post("/broadcast", {msg: msg});
-}
-function setBounty(){
-    post("/set_bounty", {
-        target: document.getElementById("bountyTarget").value.trim(),
-        amount: parseInt(document.getElementById("bountyAmount").value)
-    });
-}
-function clearBounty(){
-    post("/clear_bounty", {
-        target: document.getElementById("bountyTarget").value.trim()
-    });
-}
-setInterval(updatePlayers, 1000);
-setInterval(updateTracks, 2500);
-setInterval(updateDangerGM, 2000);
-setInterval(updateAirdropsGM, 4000);
-updatePlayers();
-updateTracks();
-updateDangerGM();
-updateAirdropsGM();
+let markers={{}},lines=[],dangerCircleGM=null,airdropMarkersGM=[];
+function escapeHtml(v){{return String(v).replace(/[&<>"']/g,c=>({{'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}}[c]));}}
+map.on('click',e=>{{document.getElementById('lat').value=e.latlng.lat.toFixed(6);document.getElementById('lon').value=e.latlng.lng.toFixed(6);}});
+async function updatePlayers(){{
+  let data=await(await fetch('/get_players')).json();
+  let current=new Set(),names=[];
+  data.forEach(p=>{{current.add(p.name);names.push(p.name);if(p.lat==null||p.lon==null)return;let pop=`<b>${{escapeHtml(p.name)}}</b><br>💰 ${{p.money}}<br>${{escapeHtml(p.state)}}`;if(p.bounty>0)pop+=`<br>🎯 ${{p.bounty}}원`;if(markers[p.name]){{markers[p.name].setLatLng([p.lat,p.lon]);markers[p.name].setPopupContent(pop);}}else{{markers[p.name]=L.marker([p.lat,p.lon]).addTo(map).bindPopup(pop);}}}});
+  for(let name in markers){{if(!current.has(name)){{map.removeLayer(markers[name]);delete markers[name];}}}}
+  fillUserSelect('user',names);fillUserSelect('bountyTarget',names);
+}}
+function fillUserSelect(id,names){{let sel=document.getElementById(id);if(!sel)return;let prev=sel.value;let opts='<option value="">-- 유저 선택 --</option>';names.sort().forEach(n=>{{opts+=`<option value="${{escapeHtml(n)}}">${{escapeHtml(n)}}</option>`;}});sel.innerHTML=opts;if(prev&&names.includes(prev))sel.value=prev;}}
+async function updateTracks(){{lines.forEach(l=>map.removeLayer(l));lines=[];let data=await(await fetch('/get_tracks')).json();for(let u in data){{if(data[u].length>1)lines.push(L.polyline(data[u],{{color:'#f43f5e',weight:4,opacity:0.7}}).addTo(map));}}}}
+async function updateDangerGM(){{let d=await(await fetch('/get_danger')).json();if(d.lat){{if(dangerCircleGM)map.removeLayer(dangerCircleGM);dangerCircleGM=L.circle([d.lat,d.lon],{{radius:d.r,color:'red',fillOpacity:0.15}}).addTo(map);}}else if(dangerCircleGM){{map.removeLayer(dangerCircleGM);dangerCircleGM=null;}}}}
+async function updateAirdropsGM(){{airdropMarkersGM.forEach(m=>map.removeLayer(m));airdropMarkersGM=[];let data=await(await fetch('/get_airdrops')).json();data.forEach(a=>{{airdropMarkersGM.push(L.marker([a.lat,a.lon],{{icon:L.divIcon({{className:'a',html:'🎁',iconSize:[30,30]}})}}).addTo(map));}});}}
+function post(url,body){{fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}}).then(async r=>{{let m=await r.text();if(!r.ok)throw new Error(m||('HTTP '+r.status));alert('✅ 실행 완료');updatePlayers();updateAirdropsGM();}}).catch(e=>alert('❌ '+e.message));}}
+function freeze(){{post('/freeze',{{user:document.getElementById('user').value}});}}
+function unfreeze(){{post('/unfreeze',{{user:document.getElementById('user').value}});}}
+function kill(){{post('/kill',{{target:document.getElementById('user').value}});}}
+function setDanger(){{post('/set_danger',{{lat:parseFloat(document.getElementById('lat').value),lon:parseFloat(document.getElementById('lon').value),r:parseFloat(document.getElementById('r').value)}});}}
+function clearDanger(){{post('/clear_danger',{{}});}}
+function spawnAirdrop(){{post('/spawn_airdrop',{{lat:parseFloat(document.getElementById('lat').value),lon:parseFloat(document.getElementById('lon').value)}});}}
+function sendBroadcast(){{let m=document.getElementById('broadcastMsg').value.trim();if(m)post('/broadcast',{{msg:m}});}}
+function setBounty(){{post('/set_bounty',{{target:document.getElementById('bountyTarget').value.trim(),amount:parseInt(document.getElementById('bountyAmount').value)}});}}
+function clearBounty(){{post('/clear_bounty',{{target:document.getElementById('bountyTarget').value.trim()}});}}
+setInterval(updatePlayers,1000);setInterval(updateTracks,2500);setInterval(updateDangerGM,2000);setInterval(updateAirdropsGM,4000);
+updatePlayers();updateTracks();updateDangerGM();updateAirdropsGM();
 </script>
 </body>
 </html>
 """
 
-
 @app.route("/freeze", methods=["POST"])
 def freeze():
-    if not session.get("admin"):
-        return "권한 없음", 403
+    if not session.get("admin"): return "권한 없음", 403
     data = request.get_json(silent=True) or {}
     user = str(data.get("user", "")).strip()
-    if not user:
-        return "유저 닉네임을 입력하세요", 400
-    with data_lock:
-        frozen[user] = True
+    if not user: return "유저 닉네임을 입력하세요", 400
+    with data_lock: frozen[user] = True
     return "ok"
 
 @app.route("/unfreeze", methods=["POST"])
 def unfreeze():
-    if not session.get("admin"):
-        return "권한 없음", 403
+    if not session.get("admin"): return "권한 없음", 403
     data = request.get_json(silent=True) or {}
     user = str(data.get("user", "")).strip()
-    if not user:
-        return "유저 닉네임을 입력하세요", 400
-    with data_lock:
-        frozen.pop(user, None)
+    if not user: return "유저 닉네임을 입력하세요", 400
+    with data_lock: frozen.pop(user, None)
     return "ok"
 
 @app.route("/kill", methods=["POST"])
 def kill():
-    if not session.get("admin"):
-        return "권한 없음", 403
+    if not session.get("admin"): return "권한 없음", 403
     data = request.get_json(silent=True) or {}
     target = str(data.get("target", "")).strip()
-    if not target:
-        return "유저 닉네임을 입력하세요", 400
-    with data_lock:
-        users[target] = "dead"
+    if not target: return "유저 닉네임을 입력하세요", 400
+    with data_lock: users[target] = "dead"
     save_data()
     return "ok"
 
 @app.route("/set_danger", methods=["POST"])
 def set_danger():
-    if not session.get("admin"):
-        return "권한 없음", 403
+    if not session.get("admin"): return "권한 없음", 403
     d = request.get_json(silent=True) or {}
     try:
-        lat = float(d["lat"])
-        lon = float(d["lon"])
-        r = float(d["r"])
+        lat, lon, r = float(d["lat"]), float(d["lon"]), float(d["r"])
     except (KeyError, TypeError, ValueError):
         return "좌표 또는 반경이 잘못되었습니다", 400
     if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(r)) or r <= 0:
@@ -691,8 +479,7 @@ def set_danger():
 
 @app.route("/clear_danger", methods=["POST"])
 def clear_danger():
-    if not session.get("admin"):
-        return "권한 없음", 403
+    if not session.get("admin"): return "권한 없음", 403
     with data_lock:
         global damage_zone
         damage_zone = None
@@ -705,7 +492,6 @@ def get_danger():
         lat, lon, r = damage_zone
         return jsonify({"lat": lat, "lon": lon, "r": r})
     return jsonify({})
-
 
 if __name__ == "__main__":
     print("[START] GPS 게임 서버 v5")
