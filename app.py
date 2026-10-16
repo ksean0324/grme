@@ -143,7 +143,7 @@ def gps():
         if last:
             dist = haversine(last[0], last[1], lat, lon)
             dt = time.time() - last[2] if len(last) > 2 else 999
-            if dt > 0 and dist / max(dt, 0.1) > 30: return "⚡ 속도 이상 (치트 의심)"
+            if dt > 0 and dist / max(dt, 0.1) > (50 / 3.6): return "⚡ 속도 이상 (치트 의심, 50km/h 초과)"
         last_gps[name] = (lat, lon, time.time())
         if name not in tracks: tracks[name] = []
         tracks[name].append([lat, lon])
@@ -162,7 +162,7 @@ def gps():
                 break
         dist_target = haversine(lat, lon, TARGET_LAT, TARGET_LON)
         if dist_target >= 2000:
-            gps_success[name] = False  # 2000m 이상 멀어지면 다시 체크인 가능
+            gps_success[name] = False
         if dist_target < 20:
             if not gps_success.get(name, False):
                 money[name] = money.get(name, 0) + 100
