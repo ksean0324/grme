@@ -148,29 +148,42 @@ def gps():
         if name not in tracks: tracks[name] = []
         tracks[name].append([lat, lon])
         if len(tracks[name]) > 200: tracks[name] = tracks[name][-200:]
+        in_danger = False
         if damage_zone:
             dlat, dlon, r = damage_zone
             if haversine(lat, lon, dlat, dlon) <= r:
-                taken = money.get(name, 0)
-                money[name] = 0
-                users[name] = "dead"
-                msg = "💥 위험 구역 사망!"
-                if taken > 0:
-                    candidates = [n for n, st in users.items() if st != "dead" and n != name]
-                    if candidates:
-                        poorest = min(candidates, key=lambda n: money.get(n, 0))
-                        money[poorest] = money.get(poorest, 0) + taken
-                        msg = f"💥 위험 구역 사망! 재산 {taken}원 몰수 → {poorest}에게 지급"
-                    else:
-                        msg = f"💥 위험 구역 사망! 재산 {taken}원 몰수 (수령자 없음)"
-                save_data()
-                return msg
+                in_danger = True
+        events_msg = []
         for drop in airdrops[:]:
             if haversine(lat, lon, drop["lat"], drop["lon"]) < 15:
-                airdrops.remove(drop); money[name] = money.get(name, 0) + 200; save_data(); return "🎁 에어드롭 획득! +200"
+                airdrops.remove(drop)
+                money[name] = money.get(name, 0) + 200
+                events_msg.append("🎁 에어드롭 +200")
+                break
         if haversine(lat, lon, TARGET_LAT, TARGET_LON) < 20:
             if not gps_success.get(name, False):
-                money[name] = money.get(name, 0) + 100; gps_success[name] = True; save_data(); return "🎉 목표 지점 체크인 성공! +100"
+                money[name] = money.get(name, 0) + 100
+                gps_success[name] = True
+                events_msg.append("🎉 체크인 +100")
+        if in_danger:
+            taken = money.get(name, 0)
+            if taken > 0:
+                money[name] = 0
+                candidates = [n for n, st in users.items() if st != "dead" and n != name]
+                if candidates:
+                    poorest = min(candidates, key=lambda n: money.get(n, 0))
+                    money[poorest] = money.get(poorest, 0) + taken
+                    conf = f"⚠ 위험구역 재산 {taken}원 몰수 → {poorest}"
+                else:
+                    conf = f"⚠ 위험구역 재산 {taken}원 몰수 (수령자 없음)"
+                events_msg.append(conf)
+            else:
+                events_msg.append("⚠ 위험구역 (재산 없음)")
+            save_data()
+            return " | ".join(events_msg) if events_msg else "⚠ 위험구역"
+        if events_msg:
+            save_data()
+            return " | ".join(events_msg)
     return "✅ 위치가 기록되었습니다"
 
 @app.route("/get_airdrops")
