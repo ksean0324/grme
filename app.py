@@ -160,7 +160,10 @@ def gps():
                 money[name] = money.get(name, 0) + 200
                 events_msg.append("🎁 에어드롭 +200")
                 break
-        if haversine(lat, lon, TARGET_LAT, TARGET_LON) < 20:
+        dist_target = haversine(lat, lon, TARGET_LAT, TARGET_LON)
+        if dist_target >= 2000:
+            gps_success[name] = False  # 2000m 이상 멀어지면 다시 체크인 가능
+        if dist_target < 20:
             if not gps_success.get(name, False):
                 money[name] = money.get(name, 0) + 100
                 gps_success[name] = True
