@@ -19,6 +19,7 @@ events = []
 damage_zone = None
 broadcasts = []
 bounties = {}
+speed_history = {}  # 최근 이동 속도(m/s) — 일정 속도 치트 감지용
 data_lock = RLock()
 
 DATA_FILE = "data.json"
@@ -143,7 +144,21 @@ def gps():
         if last:
             dist = haversine(last[0], last[1], lat, lon)
             dt = time.time() - last[2] if len(last) > 2 else 999
-            if dt > 0 and dist / max(dt, 0.1) > (50 / 3.6): return "⚡ 속도 이상 (치트 의심, 50km/h 초과)"
+            if dt > 0:
+                speed = dist / max(dt, 0.1)
+                if speed > (50 / 3.6):
+                    return "⚡ 속도 이상 (치트 의심, 50km/h 초과)"
+                hist = speed_history.setdefault(name, [])
+                if speed >= 1.5:
+                    hist.append(speed)
+                    if len(hist) > 8:
+                        del hist[:-8]
+                    if len(hist) >= 5:
+                        mn, mx = min(hist), max(hist)
+                        if (mx - mn) < 0.35:
+                            return "⚡ 속도가 너무 일정함 (치트 의심)"
+                else:
+                    hist.clear()
         last_gps[name] = (lat, lon, time.time())
         if name not in tracks: tracks[name] = []
         tracks[name].append([lat, lon])
