@@ -20,13 +20,26 @@ damage_zone = None
 broadcasts = []
 bounties = {}
 speed_history = {}  # 최근 이동 속도(m/s) — 일정 속도 치트 감지용
+hide_until = {}  # name -> unix ts (관리자 지도 숨김 종료 시각)
+loans = {}  # name -> {"debt": int, "t": last interest ts}
 data_lock = RLock()
+
+# 상점 가격
+SHOP = {
+    "kill": 1000,
+    "hide": 200,
+    "freeze": 500,
+    "revive": 400,
+    "unfreeze_self": 250,
+    "loan_100": 0,
+    "loan_500": 0,
+}
 
 DATA_FILE = "data.json"
 TARGET_LAT, TARGET_LON = 37.377971, 127.877029
 
 def load_data():
-    global users, money, last_gps, gps_success, tracks, frozen, damage_zone, broadcasts, bounties, airdrops
+    global users, money, last_gps, gps_success, tracks, frozen, damage_zone, broadcasts, bounties, airdrops, hide_until, loans
     if not os.path.exists(DATA_FILE):
         return
     try:
@@ -42,6 +55,8 @@ def load_data():
             broadcasts = data.get("broadcasts", [])
             bounties = data.get("bounties", {})
             airdrops = data.get("airdrops", [])
+            hide_until = data.get("hide_until", {})
+            loans = data.get("loans", {})
     except Exception as e:
         print("load error", e)
 
@@ -58,6 +73,8 @@ def save_data():
             "broadcasts": broadcasts,
             "bounties": bounties,
             "airdrops": list(airdrops),
+            "hide_until": hide_until,
+            "loans": loans,
         }
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
@@ -71,6 +88,25 @@ def haversine(lat1, lon1, lat2, lon2):
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
     return 2 * R * math.asin(math.sqrt(a))
+
+def apply_loan_interest(name):
+    """1시간마다 부채 2배. data_lock 안에서 호출."""
+    info = loans.get(name)
+    if not info or info.get("debt", 0) <= 0:
+        return
+    now = time.time()
+    t0 = float(info.get("t", now))
+    hours = int((now - t0) // 3600)
+    if hours <= 0:
+        return
+    debt = int(info["debt"])
+    for _ in range(min(hours, 24)):
+        debt *= 2
+        if debt > 10**12:
+            break
+    info["debt"] = debt
+    info["t"] = t0 + hours * 3600
+    loans[name] = info
 
 @app.route("/")
 def index():
@@ -108,9 +144,23 @@ def game():
     return f"""<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no\">
 <title>게임 - {html.escape(name)}</title><link rel=stylesheet href=https://unpkg.com/leaflet/dist/leaflet.css>
 <style>body{{margin:0;background:#0f172a;color:white;font-family:system-ui}}#map{{height:70vh;width:100%}}.bar{{padding:10px;background:#1e2937;display:flex;flex-wrap:wrap;gap:8px;align-items:center}}button{{padding:8px 14px;background:#3b82f6;color:white;border:none;border-radius:6px;font-size:1em}}.airdrop{{background:transparent!important;border:none!important}}</style></head>
-<body><div class=bar><b id=meName>{html.escape(name)}</b><span id=money>💰 0</span><span id=status></span>
-<div id=playControls style=display:none><button onclick=sendGPS()>📍 위치 전송</button></div>
+<body><div class=bar><b id=meName>{html.escape(name)}</b><span id=money>💰 0</span><span id=debt style=color:#fbbf24></span><span id=hideInfo style=color:#a78bfa></span><span id=status></span>
+<div id=playControls style=display:none><button onclick=sendGPS()>📍 위치 전송</button><button onclick=toggleShop() style=background:#16a34a>🛒 상점</button></div>
 <div id=specControls style=display:none><span style=color:#fbbf24>👁 관전자 모드 (PC)</span></div></div>
+<div id=shopPanel style="display:none;background:#1e2937;padding:12px;margin:8px;border-radius:8px">
+<b>🛒 코인 상점</b>
+<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+<input id=shopTarget placeholder="대상 닉네임" style="padding:8px;border-radius:6px;border:none;width:120px">
+<button onclick=buy('kill')>☠ 즉사 (1000)</button>
+<button onclick=buy('freeze')>🧊 얼리기 (500)</button>
+<button onclick=buy('hide')>👻 위치숨김 1분 (200)</button>
+<button onclick=buy('revive')>✨ 부활 (400)</button>
+<button onclick=buy('unfreeze_self')>🔥 내 얼음해제 (250)</button>
+<button onclick=buy('loan_100')>💵 대출 100</button>
+<button onclick=buy('loan_500')>💵 대출 500</button>
+</div>
+<p style="font-size:0.85em;color:#94a3b8;margin:8px 0 0">대출 이자는 1시간마다 2배. 위치숨김은 연타 시 시간 누적.</p>
+</div>
 <div id=map></div><script src=https://unpkg.com/leaflet/dist/leaflet.js></script><script>
 const NAME={json.dumps(name)};
 function isPhoneOrTablet(){{const ua=navigator.userAgent||'';if(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua))return true;if(navigator.maxTouchPoints>1)return true;return false;}}
@@ -124,7 +174,28 @@ async function updateDanger(){{let d=await(await fetch('/get_danger')).json();if
 async function updateAirdrops(){{airdropMarkers.forEach(m=>map.removeLayer(m));airdropMarkers=[];let data=await(await fetch('/get_airdrops')).json();data.forEach(a=>{{airdropMarkers.push(L.marker([a.lat,a.lon],{{icon:L.divIcon({{className:'airdrop',html:'🎁',iconSize:[30,30]}})}}).addTo(map).bindPopup('🎁 에어드랍'));}});}}
 async function checkBroadcast(){{let d=await(await fetch('/get_broadcast')).json();if(d.time>lastBroadcastTime){{lastBroadcastTime=d.time;if(d.msg)alert('📢 '+d.msg);}}}}
 async function updateSpectatorPlayers(){{if(isPlayer)return;let data=await(await fetch('/get_players')).json();let current=new Set();data.forEach(p=>{{if(p.lat==null||p.lon==null)return;current.add(p.name);let pop=`<b>${{escapeHtml(p.name)}}</b><br>💰 ${{p.money}}<br>${{escapeHtml(p.state)}}`;if(p.bounty>0)pop+=`<br>🎯 ${{p.bounty}}원`;if(playerMarkers[p.name]){{playerMarkers[p.name].setLatLng([p.lat,p.lon]);playerMarkers[p.name].setPopupContent(pop);}}else playerMarkers[p.name]=L.marker([p.lat,p.lon],{{icon:redIcon}}).addTo(map).bindPopup(pop);}});for(let n in playerMarkers){{if(!current.has(n)){{map.removeLayer(playerMarkers[n]);delete playerMarkers[n];}}}}}}
-setInterval(updateDanger,2000);setInterval(updateAirdrops,4000);setInterval(checkBroadcast,3000);if(!isPlayer)setInterval(updateSpectatorPlayers,1500);updateDanger();updateAirdrops();if(!isPlayer)updateSpectatorPlayers();
+function toggleShop(){{const p=document.getElementById('shopPanel');p.style.display=p.style.display==='none'?'block':'none';}}
+async function buy(item){{
+  let body={{item}};
+  if(item==='kill'||item==='freeze'){{
+    let t=document.getElementById('shopTarget').value.trim();
+    if(!t){{alert('대상 닉네임 입력');return;}}
+    body.target=t;
+  }}
+  let r=await fetch('/shop',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+  let t=await r.text();
+  alert(t);
+  refreshMe();
+}}
+async function refreshMe(){{
+  try{{
+    let d=await(await fetch('/get_me')).json();
+    document.getElementById('money').textContent='💰 '+d.money;
+    document.getElementById('debt').textContent=d.debt>0?(' 부채 '+d.debt):'';
+    document.getElementById('hideInfo').textContent=d.hide_left>0?(' 숨김 '+d.hide_left+'초'):'';
+  }}catch(e){{}}
+}}
+setInterval(updateDanger,2000);setInterval(updateAirdrops,4000);setInterval(checkBroadcast,3000);setInterval(refreshMe,3000);if(!isPlayer)setInterval(updateSpectatorPlayers,1500);updateDanger();updateAirdrops();refreshMe();if(!isPlayer)updateSpectatorPlayers();
 </script></body></html>"""
 
 @app.route("/gps", methods=["POST"])
@@ -278,14 +349,19 @@ def clear_bounty():
 @app.route("/get_players")
 def get_players():
     arr = []
+    now = time.time()
     with data_lock:
         seen = set()
         for n, pos in last_gps.items():
             seen.add(n)
-            arr.append({"name": n, "lat": pos[0], "lon": pos[1], "money": money.get(n, 0), "state": users.get(n, "alive"), "bounty": bounties.get(n, 0)})
+            lat, lon = pos[0], pos[1]
+            hidden = float(hide_until.get(n, 0) or 0) > now
+            if hidden:
+                lat, lon = None, None
+            arr.append({"name": n, "lat": lat, "lon": lon, "money": money.get(n, 0), "state": users.get(n, "alive"), "bounty": bounties.get(n, 0), "hidden": hidden})
         for n in users:
             if n not in seen:
-                arr.append({"name": n, "lat": None, "lon": None, "money": money.get(n, 0), "state": users.get(n, "alive"), "bounty": bounties.get(n, 0)})
+                arr.append({"name": n, "lat": None, "lon": None, "money": money.get(n, 0), "state": users.get(n, "alive"), "bounty": bounties.get(n, 0), "hidden": float(hide_until.get(n, 0) or 0) > now})
     return jsonify(arr)
 
 @app.route("/get_tracks")
@@ -340,6 +416,107 @@ function clearBounty(){post('/clear_bounty',{target:document.getElementById('bou
 setInterval(updatePlayers,1000);setInterval(updateTracks,2500);setInterval(updateDangerGM,2000);setInterval(updateAirdropsGM,4000);
 updatePlayers();updateTracks();updateDangerGM();updateAirdropsGM();
 </script></body></html>"""
+
+@app.route("/get_me")
+def get_me():
+    name = session.get("name")
+    if not name: return jsonify({"error": "login"}), 401
+    with data_lock:
+        apply_loan_interest(name)
+        now = time.time()
+        hide_left = max(0, int(float(hide_until.get(name, 0) or 0) - now))
+        debt = int(loans.get(name, {}).get("debt", 0) or 0)
+        return jsonify({
+            "name": name,
+            "money": money.get(name, 0),
+            "state": users.get(name, "alive"),
+            "frozen": bool(frozen.get(name)),
+            "debt": debt,
+            "hide_left": hide_left,
+        })
+
+@app.route("/shop", methods=["POST"])
+def shop():
+    name = session.get("name")
+    if not name: return "로그인 필요", 401
+    data = request.get_json(silent=True) or {}
+    item = str(data.get("item", "")).strip()
+    target = str(data.get("target", "")).strip()
+    if item not in SHOP:
+        return "없는 상품", 400
+    with data_lock:
+        apply_loan_interest(name)
+        if item == "loan_100":
+            money[name] = money.get(name, 0) + 100
+            info = loans.get(name, {"debt": 0, "t": time.time()})
+            info["debt"] = int(info.get("debt", 0)) + 100
+            info["t"] = float(info.get("t") or time.time())
+            loans[name] = info
+            save_data()
+            return f"대출 +100 (부채 {info['debt']})"
+        if item == "loan_500":
+            money[name] = money.get(name, 0) + 500
+            info = loans.get(name, {"debt": 0, "t": time.time()})
+            info["debt"] = int(info.get("debt", 0)) + 500
+            info["t"] = float(info.get("t") or time.time())
+            loans[name] = info
+            save_data()
+            return f"대출 +500 (부채 {info['debt']})"
+
+        price = SHOP[item]
+        bal = money.get(name, 0)
+        if bal < price:
+            return f"잔액 부족 (필요 {price})", 400
+
+        if item == "kill":
+            if not target or target == name:
+                return "대상 닉네임을 입력하세요", 400
+            if target not in users:
+                return "없는 유저", 400
+            if users.get(target) == "dead":
+                return "이미 사망", 400
+            money[name] = bal - price
+            users[target] = "dead"
+            save_data()
+            return f"☠ {target} 즉사 처리"
+
+        if item == "freeze":
+            if not target or target == name:
+                return "대상 닉네임을 입력하세요", 400
+            if target not in users:
+                return "없는 유저", 400
+            money[name] = bal - price
+            frozen[target] = True
+            save_data()
+            return f"🧊 {target} 얼림"
+
+        if item == "hide":
+            money[name] = bal - price
+            now = time.time()
+            cur = float(hide_until.get(name, 0) or 0)
+            base = cur if cur > now else now
+            hide_until[name] = base + 60
+            left = int(hide_until[name] - now)
+            save_data()
+            return f"👻 관리자 지도 숨김 +1분 (남은 {left}초)"
+
+        if item == "revive":
+            if users.get(name) != "dead":
+                return "사망 상태가 아닙니다", 400
+            money[name] = bal - price
+            users[name] = "alive"
+            save_data()
+            return "✨ 부활!"
+
+        if item == "unfreeze_self":
+            if not frozen.get(name):
+                return "얼어있지 않습니다", 400
+            money[name] = bal - price
+            frozen.pop(name, None)
+            save_data()
+            return "🔥 얼음 해제"
+
+        return "처리 실패", 400
 
 @app.route("/freeze", methods=["POST"])
 def freeze():
